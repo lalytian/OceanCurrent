@@ -1,4 +1,19 @@
-# React + TypeScript + Vite
+# OceanCurrent (洋流桌面端)
+
+这是 Ocean Stream 的跨平台桌面客户端代码仓库。
+
+## 📚 洋流专栏文档
+
+我们为你开辟了详细的进度与框架专栏，请点击下方链接查阅本项目的核心设计与开发进展：
+
+1. 🏗️ [核心技术框架 (Framework)](./docs/01-framework.md)
+2. 📊 [整体进度概览 (Overall Progress)](./docs/02-overall-progress.md)
+3. ✅ [已完成进度 (Completed)](./docs/03-completed.md)
+4. 🚀 [未完成计划 (Unfinished)](./docs/04-unfinished.md)
+
+---
+
+## 快速启动 (Dev)
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
