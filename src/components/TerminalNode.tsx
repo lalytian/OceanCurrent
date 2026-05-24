@@ -26,6 +26,7 @@ export default function TerminalNode({ cwd }: TerminalNodeProps) {
     term.loadAddon(fitAddon);
     term.open(terminalRef.current);
     fitAddon.fit();
+    term.focus(); // 自动获取焦点，用户可直接敲键盘
     xtermRef.current = term;
 
     term.writeln('\x1b[36m[Ocean Stream]\x1b[0m 欢迎进入隔离工作区');
