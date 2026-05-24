@@ -146,20 +146,32 @@ export default function App() {
   // ── 监听 Ruflo 桥接同步事件 ──
   useEffect(() => {
     const unlisten = listen<{ count: number }>('agents-synced', (_event) => {
-      // 桥接同步完成 → 重新加载 Agent 列表
       invoke<AgentRecord[]>('get_agents')
         .then((agents) => setNodes(agents.map(agentToNode)))
         .catch(() => {});
     });
-
     return () => { unlisten.then((fn) => fn()); };
   }, [setNodes]);
+
+  // ── 监听 PTY 进程退出 ──
+  useEffect(() => {
+    const unlisten = listen<string>('pty-exit', () => {
+      setActiveTerminal(null);
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
 
   // 手动刷新按钮
   const handleRefresh = useCallback(() => {
     invoke<number>('refresh_agents')
       .then((n) => console.log(`[Ocean] 手动刷新完成，${n} 个 agent`))
       .catch((e) => console.warn('[Ocean] 刷新失败:', e));
+  }, []);
+
+  // 关闭终端 + 清理 PTY 进程
+  const closeTerminal = useCallback(() => {
+    invoke('kill_pty').catch(() => {});
+    setActiveTerminal(null);
   }, []);
 
   const onConnect = useCallback(
@@ -226,7 +238,7 @@ export default function App() {
             <span style={{ color: '#4a90e2', fontWeight: 'bold', fontSize: 14 }}>
               ⬇ L2 工作区 — {activeTerminal.nodeId} | 📂 {activeTerminal.cwd}
             </span>
-            <button onClick={() => setActiveTerminal(null)}
+            <button onClick={closeTerminal}
               style={{ background: 'transparent', border: '1px solid #666', color: '#ccc', padding: '4px 12px', borderRadius: 4, cursor: 'pointer' }}>
               ✖ 关闭
             </button>

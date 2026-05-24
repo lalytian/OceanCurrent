@@ -47,6 +47,8 @@ struct DbState {
 
 struct PtyState {
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
+    child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send>>>>,
+    alive: Arc<Mutex<bool>>,
 }
 
 // Ruflo MCP 桥接状态 — 前端通过此桥同步 Agent 数据
@@ -476,11 +478,16 @@ fn spawn_pty(window: Window, state: tauri::State<'_, PtyState>, cwd: String) -> 
     cmd.cwd(&real_cwd);
     cmd.env("OPENAI_API_BASE", "http://127.0.0.1:18000/v1");
 
-    let _child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    *state.writer.lock().unwrap() = Some(writer);
 
+    // 保持 child 存活——不 drop，否则进程被杀、管道关闭
+    *state.child.lock().unwrap() = Some(Box::new(child));
+    *state.writer.lock().unwrap() = Some(writer);
+    *state.alive.lock().unwrap() = true;
+
+    let alive_flag = state.alive.clone();
     thread::spawn(move || {
         let mut buf = [0u8; 1024];
         while let Ok(n) = reader.read(&mut buf) {
@@ -488,6 +495,9 @@ fn spawn_pty(window: Window, state: tauri::State<'_, PtyState>, cwd: String) -> 
             let output = String::from_utf8_lossy(&buf[..n]).to_string();
             window.emit("pty-output", output).unwrap_or(());
         }
+        // 子进程退出 → 标记 PTY 不可用，通知前端
+        *alive_flag.lock().unwrap() = false;
+        window.emit("pty-exit", "PTY process exited").unwrap_or(());
     });
 
     Ok(())
@@ -495,8 +505,25 @@ fn spawn_pty(window: Window, state: tauri::State<'_, PtyState>, cwd: String) -> 
 
 #[tauri::command]
 fn write_pty(input: String, state: tauri::State<'_, PtyState>) -> Result<(), String> {
+    if !*state.alive.lock().unwrap() {
+        return Err("PTY 进程已退出，请重新打开终端".to_string());
+    }
     if let Some(writer) = state.writer.lock().unwrap().as_mut() {
-        writer.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
+        writer.write_all(input.as_bytes()).map_err(|e| {
+            *state.alive.lock().unwrap() = false;
+            format!("write_pty 失败: {}", e)
+        })?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn kill_pty(state: tauri::State<'_, PtyState>) -> Result<(), String> {
+    *state.alive.lock().unwrap() = false;
+    state.writer.lock().unwrap().take();
+    if let Some(mut child) = state.child.lock().unwrap().take() {
+        child.kill().ok();
+        child.wait().ok();
     }
     Ok(())
 }
@@ -522,7 +549,7 @@ fn main() {
 
     tauri::Builder::default()
         .manage(DbState { conn: db.clone() })
-        .manage(PtyState { writer: Arc::new(Mutex::new(None)) })
+        .manage(PtyState { writer: Arc::new(Mutex::new(None)), child: Arc::new(Mutex::new(None)), alive: Arc::new(Mutex::new(false)) })
         .manage(RufloBridgeState {
             mcp_url: "http://127.0.0.1:3100".to_string(),
             client: HttpClient::new(),
@@ -552,6 +579,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             spawn_pty,
             write_pty,
+            kill_pty,
             get_agents,
             get_traces,
             update_agent_status,
