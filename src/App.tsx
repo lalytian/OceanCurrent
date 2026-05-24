@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/tauri';
 import { listen } from '@tauri-apps/api/event';
 import {
   ReactFlow,
@@ -14,54 +15,123 @@ import type { Connection, Edge, Node } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import TerminalNode from './components/TerminalNode';
 
-// 初始占位节点 (L1 拓扑演示)
-const initialNodes: Node[] = [
-  { id: 'desktop', type: 'default', position: { x: 100, y: 100 }, data: { label: '🖥️ Desktop (双击打开终端)', cwd: '~/' }, style: { border: '2px solid #333', background: '#f8f9fa', color: '#333' } },
-  { id: 'ruflo-queen', type: 'default', position: { x: 100, y: 250 }, data: { label: '👑 Ruflo Queen Coordinator' }, style: { border: '2px solid #4a90e2', background: '#e3f2fd', color: '#1565c0' } },
-  { id: 'ocean-mcp', type: 'default', position: { x: 350, y: 175 }, data: { label: '🔌 Ocean MCP Server' }, style: { border: '2px dashed #ff9800', background: '#fff3e0' } },
-];
+// 节点样式映射
+const STYLE_HOST = { border: '2px solid #333', background: '#f8f9fa', color: '#333' };
+const STYLE_COORD = { border: '2px solid #4a90e2', background: '#e3f2fd', color: '#1565c0' };
+const STYLE_SERVER = { border: '2px dashed #ff9800', background: '#fff3e0' };
+const STYLE_CLI = { border: '2px solid #00cc66', background: '#e8f5e9', color: '#2e7d32' };
+const STYLE_OFFLINE = { border: '2px dashed #999', background: '#f5f5f5', color: '#999' };
 
 // 初始连线
-const initialEdges: Edge[] = [
+const FIXED_EDGES: Edge[] = [
   { id: 'e1-2', source: 'desktop', target: 'ruflo-queen', animated: true, style: { stroke: '#4a90e2', strokeWidth: 2 } },
   { id: 'e2-3', source: 'ruflo-queen', target: 'ocean-mcp', animated: true },
 ];
 
+interface AgentRecord {
+  id: string;
+  name: string;
+  agent_type: string;
+  status: string;
+  last_seen: string;
+}
+
+function agentToNode(a: AgentRecord): Node {
+  const style =
+    a.status === 'offline' ? STYLE_OFFLINE :
+    a.agent_type === 'host' ? STYLE_HOST :
+    a.agent_type === 'coordinator' ? STYLE_COORD :
+    a.agent_type === 'server' ? STYLE_SERVER :
+    a.agent_type === 'cli' ? STYLE_CLI : STYLE_HOST;
+
+  const emoji =
+    a.agent_type === 'host' ? '🖥️' :
+    a.agent_type === 'coordinator' ? '👑' :
+    a.agent_type === 'server' ? '🔌' :
+    a.agent_type === 'cli' ? '💻' : '🤖';
+
+  return {
+    id: a.id,
+    type: 'default',
+    position: { 
+      x: 100 + Math.random() * 300, 
+      y: 100 + Math.random() * 200 
+    },
+    data: { 
+      label: `${emoji} ${a.name}\n[${a.status}] 双击打开终端`,
+      cwd: a.id === 'desktop' ? '~/' : `~/projects/ocean/${a.id}`,
+    },
+    style,
+  };
+}
+
 export default function App() {
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(FIXED_EDGES);
   const [activeTerminal, setActiveTerminal] = useState<{ nodeId: string; cwd: string } | null>(null);
 
-  // 监听来自 Rust 本地拦截网关的事件
+  // ── 启动时从 SQLite 账本加载 Agent 列表 ──
+  useEffect(() => {
+    invoke<AgentRecord[]>('get_agents')
+      .then((agents) => {
+        setNodes(agents.map(agentToNode));
+      })
+      .catch(() => {
+        // 回退：如果 Rust 层还没就绪，用硬编码节点
+        setNodes([
+          agentToNode({ id: 'desktop', name: 'Desktop', agent_type: 'host', status: 'idle', last_seen: '' }),
+          agentToNode({ id: 'ruflo-queen', name: 'Ruflo Queen', agent_type: 'coordinator', status: 'idle', last_seen: '' }),
+          agentToNode({ id: 'ocean-mcp', name: 'Ocean MCP', agent_type: 'server', status: 'idle', last_seen: '' }),
+        ]);
+      });
+  }, [setNodes]);
+
+  // ── 监听拦截网关事件 ──
   useEffect(() => {
     const unlisten = listen<{ agent_id: string; prompt: string; model: string }>('gateway-intercept', (event) => {
-      const { prompt, model } = event.payload;
-      console.log('Intercepted:', event.payload);
-      
-      setNodes((nds) => 
-        nds.map((node) => {
-          if (node.id === 'desktop') {
+      const { agent_id, prompt, model } = event.payload;
+
+      // 刷新画布节点：标记该 agent 为 working，闪烁绿色
+      setNodes((nds) => {
+        const exists = nds.some((n) => n.id === agent_id);
+        if (!exists) {
+          // 新发现的 CLI agent — 动态加入画布
+          nds = [...nds, agentToNode({
+            id: agent_id,
+            name: agent_id,
+            agent_type: 'cli',
+            status: 'working',
+            last_seen: new Date().toISOString(),
+          })];
+        }
+        return nds.map((node) => {
+          if (node.id === agent_id) {
             return {
               ...node,
-              data: { 
+              data: {
                 ...node.data,
-                label: `🖥️ Desktop\n\n[拦截到 API 请求]\n模型: ${model}\nPrompt: ${prompt.substring(0, 20)}...` 
+                label: `💻 ${node.id}\n[API] ${model}\n${prompt.substring(0, 30)}...`,
               },
-              style: { ...node.style, borderColor: '#00ff00', boxShadow: '0 0 15px #00ff00' }
+              style: { ...node.style, borderColor: '#00ff00', boxShadow: '0 0 15px #00ff00' },
             };
           }
           return node;
-        })
-      );
+        });
+      });
 
+      // 3秒后恢复
       setTimeout(() => {
+        invoke('update_agent_status', { agentId: agent_id, status: 'idle' }).catch(() => {});
         setNodes((nds) =>
           nds.map((node) => {
-            if (node.id === 'desktop') {
+            if (node.id === agent_id) {
               return {
                 ...node,
-                data: { ...node.data, label: '🖥️ Desktop (双击打开终端)' },
-                style: { ...node.style, borderColor: '#333', boxShadow: 'none' }
+                data: {
+                  ...node.data,
+                  label: `💻 ${node.id}\n[idle] 双击打开终端`,
+                },
+                style: { ...node.style, borderColor: STYLE_CLI.border, boxShadow: 'none' },
               };
             }
             return node;
@@ -70,9 +140,7 @@ export default function App() {
       }, 3000);
     });
 
-    return () => {
-      unlisten.then((fn) => fn());
-    };
+    return () => { unlisten.then((fn) => fn()); };
   }, [setNodes]);
 
   const onConnect = useCallback(
@@ -80,7 +148,6 @@ export default function App() {
     [setEdges],
   );
 
-  // 双击节点 → 打开该节点绑定的隔离终端抽屉
   const onNodeDoubleClick = useCallback(
     (_event: React.MouseEvent, node: Node) => {
       const cwd = (node.data as Record<string, string>)?.cwd || '~/';
@@ -102,58 +169,26 @@ export default function App() {
         colorMode="dark"
       >
         <Controls />
-        <MiniMap nodeStrokeColor={(n) => {
-            if (n.style?.background) return n.style.background as string;
-            return '#fff';
-        }} nodeColor={(n) => {
-            if (n.style?.background) return n.style.background as string;
-            return '#fff';
-        }} />
+        <MiniMap nodeStrokeColor={(n) => (n.style?.background as string) || '#fff'}
+                 nodeColor={(n) => (n.style?.background as string) || '#fff'} />
         <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
       </ReactFlow>
 
-      {/* L2 抽屉层：终端沙盒 */}
       {activeTerminal && (
         <div style={{
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: '45%',
-          background: '#1a1a1a',
-          borderTop: '2px solid #4a90e2',
-          zIndex: 100,
-          display: 'flex',
-          flexDirection: 'column',
+          position: 'absolute', bottom: 0, left: 0, right: 0, height: '45%',
+          background: '#1a1a1a', borderTop: '2px solid #4a90e2', zIndex: 100,
+          display: 'flex', flexDirection: 'column',
         }}>
-          {/* 抽屉标题栏 */}
-          <div style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            padding: '8px 16px',
-            background: '#2d2d2d',
-            borderBottom: '1px solid #444',
-          }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 16px', background: '#2d2d2d', borderBottom: '1px solid #444' }}>
             <span style={{ color: '#4a90e2', fontWeight: 'bold', fontSize: 14 }}>
-              ⬇ L2 节点工作区 — 绑定: {activeTerminal.nodeId} | 📂 CWD: {activeTerminal.cwd}
+              ⬇ L2 工作区 — {activeTerminal.nodeId} | 📂 {activeTerminal.cwd}
             </span>
-            <button
-              onClick={() => setActiveTerminal(null)}
-              style={{
-                background: 'transparent',
-                border: '1px solid #666',
-                color: '#ccc',
-                padding: '4px 12px',
-                borderRadius: 4,
-                cursor: 'pointer',
-                fontSize: 13,
-              }}
-            >
+            <button onClick={() => setActiveTerminal(null)}
+              style={{ background: 'transparent', border: '1px solid #666', color: '#ccc', padding: '4px 12px', borderRadius: 4, cursor: 'pointer' }}>
               ✖ 关闭
             </button>
           </div>
-          {/* 终端区域 */}
           <div style={{ flex: 1, overflow: 'hidden', padding: 10 }}>
             <TerminalNode cwd={activeTerminal.cwd} />
           </div>
