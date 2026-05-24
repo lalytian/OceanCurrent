@@ -1,4 +1,5 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import {
   ReactFlow,
   MiniMap,
@@ -26,8 +27,52 @@ const initialEdges: Edge[] = [
 ];
 
 export default function App() {
-  const [nodes, , onNodesChange] = useNodesState(initialNodes);
+  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+
+  // 监听来自 Rust 本地拦截网关的事件
+  useEffect(() => {
+    const unlisten = listen<{ agent_id: string; prompt: string; model: string }>('gateway-intercept', (event) => {
+      const { prompt, model } = event.payload;
+      console.log('Intercepted:', event.payload);
+      
+      // 更新画布节点状态，让它闪烁或者展示内容
+      setNodes((nds) => 
+        nds.map((node) => {
+          if (node.id === 'desktop') {
+            return {
+              ...node,
+              data: { 
+                label: `🖥️ Desktop\n\n[拦截到 API 请求]\n模型: ${model}\nPrompt: ${prompt.substring(0, 20)}...` 
+              },
+              style: { ...node.style, borderColor: '#00ff00', boxShadow: '0 0 15px #00ff00' }
+            };
+          }
+          return node;
+        })
+      );
+
+      // 3秒后恢复原状
+      setTimeout(() => {
+        setNodes((nds) =>
+          nds.map((node) => {
+            if (node.id === 'desktop') {
+              return {
+                ...node,
+                data: { label: '🖥️ Desktop (Local-Device)' },
+                style: { ...node.style, borderColor: '#333', boxShadow: 'none' }
+              };
+            }
+            return node;
+          })
+        );
+      }, 3000);
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [setNodes]);
 
   const onConnect = useCallback(
     (params: Connection | Edge) => setEdges((eds) => addEdge(params, eds)),
