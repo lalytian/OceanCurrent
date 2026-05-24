@@ -47,7 +47,6 @@ struct DbState {
 
 struct PtyState {
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
-    child: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send>>>>,
     alive: Arc<Mutex<bool>>,
 }
 
@@ -482,8 +481,9 @@ fn spawn_pty(window: Window, state: tauri::State<'_, PtyState>, cwd: String) -> 
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
 
-    // 保持 child 存活——不 drop，否则进程被杀、管道关闭
-    *state.child.lock().unwrap() = Some(Box::new(child));
+    // 保持 child 存活——用 mem::forget 防止 drop 导致进程被杀
+    // 关闭 writer (kill_pty) 会关闭 PTY master → 子进程收到 SIGHUP → 自然退出
+    std::mem::forget(child);
     *state.writer.lock().unwrap() = Some(writer);
     *state.alive.lock().unwrap() = true;
 
@@ -520,11 +520,8 @@ fn write_pty(input: String, state: tauri::State<'_, PtyState>) -> Result<(), Str
 #[tauri::command]
 fn kill_pty(state: tauri::State<'_, PtyState>) -> Result<(), String> {
     *state.alive.lock().unwrap() = false;
+    // 关闭 writer → PTY master 关闭 → 子进程收到 SIGHUP → 自然退出
     state.writer.lock().unwrap().take();
-    if let Some(mut child) = state.child.lock().unwrap().take() {
-        child.kill().ok();
-        child.wait().ok();
-    }
     Ok(())
 }
 
@@ -549,7 +546,7 @@ fn main() {
 
     tauri::Builder::default()
         .manage(DbState { conn: db.clone() })
-        .manage(PtyState { writer: Arc::new(Mutex::new(None)), child: Arc::new(Mutex::new(None)), alive: Arc::new(Mutex::new(false)) })
+        .manage(PtyState { writer: Arc::new(Mutex::new(None)), alive: Arc::new(Mutex::new(false)) })
         .manage(RufloBridgeState {
             mcp_url: "http://127.0.0.1:3100".to_string(),
             client: HttpClient::new(),
