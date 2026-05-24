@@ -13,7 +13,7 @@ interface TerminalNodeProps {
 export default function TerminalNode({ cwd }: TerminalNodeProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
-  const [view, setView] = useState<'terminal' | 'bubbles'>('bubbles');
+  const [view, setView] = useState<'terminal' | 'bubbles'>('terminal');
 
   useEffect(() => {
     if (view !== 'terminal' || !terminalRef.current) return;
