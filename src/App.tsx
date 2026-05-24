@@ -14,18 +14,18 @@ import {
 import type { Connection, Edge, Node } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import TerminalNode from './components/TerminalNode';
+import AgentCardNode from './components/AgentCardNode';
+import GlowEdge from './components/GlowEdge';
+import { restorePositions, useCanvasPersistence } from './hooks/useCanvasPersistence';
 
-// 节点样式映射
-const STYLE_HOST = { border: '2px solid #333', background: '#f8f9fa', color: '#333' };
-const STYLE_COORD = { border: '2px solid #4a90e2', background: '#e3f2fd', color: '#1565c0' };
-const STYLE_SERVER = { border: '2px dashed #ff9800', background: '#fff3e0' };
-const STYLE_CLI = { border: '2px solid #00cc66', background: '#e8f5e9', color: '#2e7d32' };
-const STYLE_OFFLINE = { border: '2px dashed #999', background: '#f5f5f5', color: '#999' };
+// ── 自定义节点/边类型 ──
+const nodeTypes = { agentCard: AgentCardNode };
+const edgeTypes = { glow: GlowEdge };
 
-// 初始连线
+// 初始连线（使用 GlowEdge）
 const FIXED_EDGES: Edge[] = [
-  { id: 'e1-2', source: 'desktop', target: 'ruflo-queen', animated: true, style: { stroke: '#4a90e2', strokeWidth: 2 } },
-  { id: 'e2-3', source: 'ruflo-queen', target: 'ocean-mcp', animated: true },
+  { id: 'e1-2', source: 'desktop', target: 'ruflo-queen', type: 'glow', data: { status: 'idle' }, style: { stroke: '#4a90e2', strokeWidth: 2 } },
+  { id: 'e2-3', source: 'ruflo-queen', target: 'ocean-mcp', type: 'glow', data: { status: 'idle' } },
 ];
 
 interface AgentRecord {
@@ -36,32 +36,27 @@ interface AgentRecord {
   last_seen: string;
 }
 
-function agentToNode(a: AgentRecord): Node {
-  const style =
-    a.status === 'offline' ? STYLE_OFFLINE :
-    a.agent_type === 'host' ? STYLE_HOST :
-    a.agent_type === 'coordinator' ? STYLE_COORD :
-    a.agent_type === 'server' ? STYLE_SERVER :
-    a.agent_type === 'cli' ? STYLE_CLI : STYLE_HOST;
+const STATUS_LABELS: Record<string, string> = {
+  working: 'working',
+  idle: 'idle',
+  offline: 'offline',
+};
 
-  const emoji =
-    a.agent_type === 'host' ? '🖥️' :
-    a.agent_type === 'coordinator' ? '👑' :
-    a.agent_type === 'server' ? '🔌' :
-    a.agent_type === 'cli' ? '💻' : '🤖';
-
+function agentToNode(a: AgentRecord, savedPos?: { x: number; y: number }): Node {
   return {
     id: a.id,
-    type: 'default',
-    position: { 
-      x: 100 + Math.random() * 300, 
-      y: 100 + Math.random() * 200 
+    type: 'agentCard',
+    position: savedPos || {
+      x: 100 + Math.random() * 300,
+      y: 100 + Math.random() * 200,
     },
-    data: { 
-      label: `${emoji} ${a.name}\n[${a.status}] 双击打开终端`,
+    data: {
+      label: `${a.name}`,
+      status: STATUS_LABELS[a.status] || 'idle',
+      agentType: a.agent_type,
       cwd: a.id === 'desktop' ? '~/' : `~/projects/ocean/${a.id}`,
+      lastSeen: a.last_seen || '—',
     },
-    style,
   };
 }
 
@@ -70,19 +65,23 @@ export default function App() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(FIXED_EDGES);
   const [activeTerminal, setActiveTerminal] = useState<{ nodeId: string; cwd: string } | null>(null);
 
+  // ── 画布布局持久化 ──
+  useCanvasPersistence(nodes);
+
   // ── 启动时从 SQLite 账本加载 Agent 列表 ──
   useEffect(() => {
     invoke<AgentRecord[]>('get_agents')
       .then((agents) => {
-        setNodes(agents.map(agentToNode));
+        const restored = restorePositions(agents.map((a) => agentToNode(a)));
+        setNodes(restored);
       })
       .catch(() => {
-        // 回退：如果 Rust 层还没就绪，用硬编码节点
-        setNodes([
+        const fallback = [
           agentToNode({ id: 'desktop', name: 'Desktop', agent_type: 'host', status: 'idle', last_seen: '' }),
           agentToNode({ id: 'ruflo-queen', name: 'Ruflo Queen', agent_type: 'coordinator', status: 'idle', last_seen: '' }),
           agentToNode({ id: 'ocean-mcp', name: 'Ocean MCP', agent_type: 'server', status: 'idle', last_seen: '' }),
-        ]);
+        ];
+        setNodes(restorePositions(fallback));
       });
   }, [setNodes]);
 
@@ -91,16 +90,12 @@ export default function App() {
     const unlisten = listen<{ agent_id: string; prompt: string; model: string }>('gateway-intercept', (event) => {
       const { agent_id, prompt, model } = event.payload;
 
-      // 刷新画布节点：标记该 agent 为 working，闪烁绿色
       setNodes((nds) => {
         const exists = nds.some((n) => n.id === agent_id);
         if (!exists) {
-          // 新发现的 CLI agent — 动态加入画布
           nds = [...nds, agentToNode({
-            id: agent_id,
-            name: agent_id,
-            agent_type: 'cli',
-            status: 'working',
+            id: agent_id, name: agent_id,
+            agent_type: 'cli', status: 'working',
             last_seen: new Date().toISOString(),
           })];
         }
@@ -110,44 +105,48 @@ export default function App() {
               ...node,
               data: {
                 ...node.data,
-                label: `💻 ${node.id}\n[API] ${model}\n${prompt.substring(0, 30)}...`,
+                status: 'working',
+                label: `${node.id}\n[API] ${model}\n${prompt.substring(0, 30)}...`,
               },
-              style: { ...node.style, borderColor: '#00ff00', boxShadow: '0 0 15px #00ff00' },
             };
           }
           return node;
         });
       });
 
-      // 3秒后恢复
+      // 同步更新连线状态
+      setEdges((eds) => eds.map((e) => ({
+        ...e,
+        data: { ...e.data, status: 'working' },
+      })));
+
       setTimeout(() => {
         invoke('update_agent_status', { agentId: agent_id, status: 'idle' }).catch(() => {});
         setNodes((nds) =>
-          nds.map((node) => {
-            if (node.id === agent_id) {
-              return {
-                ...node,
-                data: {
-                  ...node.data,
-                  label: `💻 ${node.id}\n[idle] 双击打开终端`,
-                },
-                style: { ...node.style, borderColor: STYLE_CLI.border, boxShadow: 'none' },
-              };
-            }
-            return node;
-          })
+          nds.map((node) =>
+            node.id === agent_id
+              ? { ...node, data: { ...node.data, status: 'idle' } }
+              : node
+          )
         );
+        setEdges((eds) => eds.map((e) => ({
+          ...e,
+          data: { ...e.data, status: 'idle' },
+        })));
       }, 3000);
     });
 
     return () => { unlisten.then((fn) => fn()); };
-  }, [setNodes]);
+  }, [setNodes, setEdges]);
 
   // ── 监听 Ruflo 桥接同步事件 ──
   useEffect(() => {
-    const unlisten = listen<{ count: number }>('agents-synced', (_event) => {
+    const unlisten = listen<{ count: number }>('agents-synced', () => {
       invoke<AgentRecord[]>('get_agents')
-        .then((agents) => setNodes(agents.map(agentToNode)))
+        .then((agents) => {
+          const restored = restorePositions(agents.map((a) => agentToNode(a)));
+          setNodes(restored);
+        })
         .catch(() => {});
     });
     return () => { unlisten.then((fn) => fn()); };
@@ -161,17 +160,17 @@ export default function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
-  // 手动刷新按钮
+  // 关闭终端 + 清理 PTY
+  const closeTerminal = useCallback(() => {
+    invoke('kill_pty').catch(() => {});
+    setActiveTerminal(null);
+  }, []);
+
+  // 手动刷新 Ruflo
   const handleRefresh = useCallback(() => {
     invoke<number>('refresh_agents')
       .then((n) => console.log(`[Ocean] 手动刷新完成，${n} 个 agent`))
       .catch((e) => console.warn('[Ocean] 刷新失败:', e));
-  }, []);
-
-  // 关闭终端 + 清理 PTY 进程
-  const closeTerminal = useCallback(() => {
-    invoke('kill_pty').catch(() => {});
-    setActiveTerminal(null);
   }, []);
 
   const onConnect = useCallback(
@@ -197,11 +196,11 @@ export default function App() {
         borderBottom: '1px solid #333', backdropFilter: 'blur(8px)',
       }}>
         <span style={{ color: '#4a90e2', fontWeight: 'bold', fontSize: 16 }}>
-          🌊 Ocean Stream v0.4.0
+          🌊 Ocean Stream v0.5.0
         </span>
         <span style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <span style={{ color: '#888', fontSize: 12 }}>
-            {nodes.length} agents · Bridge: MCP (HTTP)
+            {nodes.length} agents · Phase 2 · 💬/⌨️
           </span>
           <button onClick={handleRefresh}
             style={{
@@ -212,6 +211,7 @@ export default function App() {
           </button>
         </span>
       </div>
+
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -219,12 +219,23 @@ export default function App() {
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onNodeDoubleClick={onNodeDoubleClick}
+        nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         fitView
         colorMode="dark"
+        defaultEdgeOptions={{ type: 'glow' }}
       >
         <Controls />
-        <MiniMap nodeStrokeColor={(n) => (n.style?.background as string) || '#fff'}
-                 nodeColor={(n) => (n.style?.background as string) || '#fff'} />
+        <MiniMap
+          nodeStrokeColor={(n) => {
+            const s = (n.data as { status?: string })?.status;
+            return s === 'working' ? '#00cc66' : s === 'offline' ? '#666' : '#4a90e2';
+          }}
+          nodeColor={(n) => {
+            const s = (n.data as { status?: string })?.status;
+            return s === 'working' ? '#1a3a1a' : s === 'offline' ? '#1a1a1a' : '#1a1a2e';
+          }}
+        />
         <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
       </ReactFlow>
 
@@ -234,12 +245,18 @@ export default function App() {
           background: '#1a1a1a', borderTop: '2px solid #4a90e2', zIndex: 100,
           display: 'flex', flexDirection: 'column',
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 16px', background: '#2d2d2d', borderBottom: '1px solid #444' }}>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '8px 16px', background: '#2d2d2d', borderBottom: '1px solid #444',
+          }}>
             <span style={{ color: '#4a90e2', fontWeight: 'bold', fontSize: 14 }}>
               ⬇ L2 工作区 — {activeTerminal.nodeId} | 📂 {activeTerminal.cwd}
             </span>
             <button onClick={closeTerminal}
-              style={{ background: 'transparent', border: '1px solid #666', color: '#ccc', padding: '4px 12px', borderRadius: 4, cursor: 'pointer' }}>
+              style={{
+                background: 'transparent', border: '1px solid #666', color: '#ccc',
+                padding: '4px 12px', borderRadius: 4, cursor: 'pointer',
+              }}>
               ✖ 关闭
             </button>
           </div>
