@@ -75,6 +75,19 @@ fn run_interceptor_gateway(app: AppHandle) {
     });
 }
 
+fn expand_home(path: &str) -> String {
+    if path.starts_with("~/") || path == "~" {
+        let home = if cfg!(windows) {
+            std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Default".to_string())
+        } else {
+            std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string())
+        };
+        if path == "~" { home } else { format!("{}/{}", home, &path[2..]) }
+    } else {
+        path.to_string()
+    }
+}
+
 // -----------------------------------------------------------------------------
 // 2. 虚拟终端与沙盒隔离 (PTY Sandbox)
 // -----------------------------------------------------------------------------
@@ -89,8 +102,8 @@ fn spawn_pty(window: Window, state: tauri::State<'_, PtyState>, cwd: String) -> 
     let shell = if cfg!(windows) { "cmd.exe" } else { "bash" };
     let mut cmd = CommandBuilder::new(shell);
     
-    // 限制工作目录并注入网关环境
-    cmd.cwd(cwd);
+    let real_cwd = expand_home(&cwd);
+    cmd.cwd(&real_cwd);
     cmd.env("OPENAI_API_BASE", "http://127.0.0.1:18000/v1");
 
     let _child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
