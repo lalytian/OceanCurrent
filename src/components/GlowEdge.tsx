@@ -1,4 +1,4 @@
-import { BaseEdge, getBezierPath } from '@xyflow/react';
+import { getBezierPath } from '@xyflow/react';
 import type { EdgeProps } from '@xyflow/react';
 
 const GLOW_COLORS: Record<string, string> = {
@@ -9,7 +9,6 @@ const GLOW_COLORS: Record<string, string> = {
 };
 
 export default function GlowEdge({
-  id,
   sourceX, sourceY,
   targetX, targetY,
   sourcePosition, targetPosition,
