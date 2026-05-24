@@ -143,6 +143,25 @@ export default function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, [setNodes]);
 
+  // ── 监听 Ruflo 桥接同步事件 ──
+  useEffect(() => {
+    const unlisten = listen<{ count: number }>('agents-synced', (_event) => {
+      // 桥接同步完成 → 重新加载 Agent 列表
+      invoke<AgentRecord[]>('get_agents')
+        .then((agents) => setNodes(agents.map(agentToNode)))
+        .catch(() => {});
+    });
+
+    return () => { unlisten.then((fn) => fn()); };
+  }, [setNodes]);
+
+  // 手动刷新按钮
+  const handleRefresh = useCallback(() => {
+    invoke<number>('refresh_agents')
+      .then((n) => console.log(`[Ocean] 手动刷新完成，${n} 个 agent`))
+      .catch((e) => console.warn('[Ocean] 刷新失败:', e));
+  }, []);
+
   const onConnect = useCallback(
     (params: Connection | Edge) => setEdges((eds) => addEdge(params, eds)),
     [setEdges],
@@ -158,6 +177,29 @@ export default function App() {
 
   return (
     <div style={{ width: '100vw', height: '100vh', backgroundColor: '#1e1e1e', position: 'relative' }}>
+      {/* 顶部工具栏 */}
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0, zIndex: 200,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '8px 16px', background: 'rgba(30,30,30,0.95)',
+        borderBottom: '1px solid #333', backdropFilter: 'blur(8px)',
+      }}>
+        <span style={{ color: '#4a90e2', fontWeight: 'bold', fontSize: 16 }}>
+          🌊 Ocean Stream v0.4.0
+        </span>
+        <span style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <span style={{ color: '#888', fontSize: 12 }}>
+            {nodes.length} agents · Bridge: MCP (HTTP)
+          </span>
+          <button onClick={handleRefresh}
+            style={{
+              background: '#2d2d2d', border: '1px solid #4a90e2', color: '#4a90e2',
+              padding: '4px 14px', borderRadius: 4, cursor: 'pointer', fontSize: 13,
+            }}>
+            🔄 同步 Ruflo
+          </button>
+        </span>
+      </div>
       <ReactFlow
         nodes={nodes}
         edges={edges}
